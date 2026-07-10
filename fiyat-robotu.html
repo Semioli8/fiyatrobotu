@@ -107,7 +107,7 @@
     font-size:12px;padding:5px 10px;border-radius:20px;border:1px solid var(--line);color:var(--text-dim);
   }
   .breakdown{
-    display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:18px;
+    display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:18px;
   }
   @media(max-width:760px){.breakdown{grid-template-columns:repeat(2,1fr);}}
   .bd-item{background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;}
@@ -195,6 +195,9 @@
         <option value="20">%20</option>
       </select>
 
+      <label>Stopaj oranı (%) — KDV hariç satış tutarı üzerinden</label>
+      <input type="number" id="stopajOran" step="0.1" value="1">
+
       <label>Kar marjı hesap şekli</label>
       <div class="kar-toggle">
         <button id="karTipiMarj" class="active" data-tip="satis">Satış fiyatı üzerinden</button>
@@ -233,6 +236,15 @@
       <table id="kargoTable"><thead><tr><th>Fiyat aralığı</th><th id="kargoColHead">Ücret (₺)</th></tr></thead><tbody></tbody></table>
       <div class="table-note">Kargo firması seçince ilgili firmanın tablosu burada açılır. Satış fiyatı hangi aralığa denk gelirse o ücret kullanılır. Değerleri kendi anlaşma fiyatlarınla güncelleyebilirsin.</div>
       <div class="tbl-actions"><button class="mini" id="resetKargo">Bu firmayı varsayılana döndür</button></div>
+    </details>
+
+    <details>
+      <summary>Ek gider / hizmet bedellerini düzenle</summary>
+      <table id="ekstraTable"><thead><tr><th>Kalem</th><th>Tip</th><th>Değer</th></tr></thead><tbody></tbody></table>
+      <div class="table-note">
+        Bu kalemler her pazaryerinin komisyona ek olarak kestiği sabit/yüzdesel hizmet bedelleridir (Trendyol Platform Hizmet Bedeli, Hepsiburada Hizmet+İşlem Bedeli, N11 Pazarlama+Pazaryeri Hizmet Bedeli, Pazarama Hizmet Bedeli, idefix'te bu kalem yok). Stopaj (%1) ayrı bir alanda, tüm pazaryerleri için ortak yasal kesinti olarak hesaplanır — KDV hariç satış tutarı üzerinden alınır ve yıl sonu vergi beyanınızda mahsup edilebilir bir peşin vergidir, kalıcı bir gider değildir ama anlık nakit akışını ve gösterilen net kârı düşürür. Tüm bu tutarlar sık güncellenir, satıcı panelinden teyit ederek burada düzeltebilirsin.
+      </div>
+      <div class="tbl-actions"><button class="mini" id="resetEkstra">Bu pazaryerini varsayılana döndür</button></div>
     </details>
 
   </div>
@@ -322,10 +334,32 @@ const DEFAULT_KARGO = {
   ]
 };
 
+// Pazaryerlerinin komisyona ek olarak kestiği hizmet bedelleri (2026 kaynaklarından derlenmiştir, sık değişir)
+const DEFAULT_EKSTRA = {
+  trendyol: [
+    {ad:"Platform Hizmet Bedeli (KDV dahil)", tip:"sabit", deger:13.19}
+  ],
+  hepsiburada: [
+    {ad:"Hizmet Bedeli", tip:"yuzde", deger:1.5},
+    {ad:"İşlem Bedeli (sabit)", tip:"sabit", deger:6.00}
+  ],
+  n11: [
+    {ad:"Pazarlama Hizmet Bedeli", tip:"yuzde", deger:1.0},
+    {ad:"Pazaryeri Hizmet Bedeli", tip:"yuzde", deger:0.67}
+  ],
+  pazarama: [
+    {ad:"Hizmet Bedeli (sabit)", tip:"sabit", deger:5.61}
+  ],
+  idefix: [
+    {ad:"Hizmet Bedeli", tip:"sabit", deger:0}
+  ]
+};
+
 // ---------- Durum ----------
 let kur = null;
 let komisyonData = JSON.parse(JSON.stringify(DEFAULT_KOMISYON));
 let kargoData = JSON.parse(JSON.stringify(DEFAULT_KARGO));
+let ekstraData = JSON.parse(JSON.stringify(DEFAULT_EKSTRA));
 let karTipi = "satis"; // veya "maliyet"
 
 // ---------- Elementler ----------
@@ -425,6 +459,40 @@ function kargoUcretiBul(firma, fiyat){
   return tiers[tiers.length - 1].ucret;
 }
 
+// ---------- Ekstra gider (hizmet bedeli) UI ----------
+function ekstraTablosunuCiz(){
+  const pazar = el('pazaryeri').value;
+  const kalemler = ekstraData[pazar];
+  const tbody = document.querySelector('#ekstraTable tbody');
+  if(kalemler.length === 0){
+    tbody.innerHTML = `<tr><td colspan="3" style="color:var(--text-dim)">Bu pazaryerinde ek hizmet bedeli bulunmuyor.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = kalemler.map((k, i) => `
+    <tr>
+      <td>${k.ad}</td>
+      <td>${k.tip === 'yuzde' ? '%' : '₺'}</td>
+      <td><input type="number" step="0.01" data-idx="${i}" value="${k.deger}"></td>
+    </tr>
+  `).join('');
+  tbody.querySelectorAll('input').forEach(inp => {
+    inp.addEventListener('input', () => {
+      kalemler[inp.dataset.idx].deger = parseFloat(inp.value) || 0;
+      hesapla();
+    });
+  });
+}
+
+function ekstraToplamlariHesapla(pazar){
+  const kalemler = ekstraData[pazar];
+  let yuzdeToplam = 0, sabitToplam = 0;
+  kalemler.forEach(k => {
+    if(k.tip === 'yuzde') yuzdeToplam += k.deger;
+    else sabitToplam += k.deger;
+  });
+  return {yuzdeToplam, sabitToplam};
+}
+
 // ---------- Kar tipi toggle ----------
 el('karTipiMarj').addEventListener('click', () => {
   karTipi = "satis";
@@ -444,18 +512,20 @@ function fmt(n){
   return "₺" + n.toLocaleString('tr-TR', {minimumFractionDigits:2, maximumFractionDigits:2});
 }
 
-function hesaplaSFiyat(maliyetTRY, komisyonOranYuzde, kdvOranYuzde, kargoUcret, karOranYuzde, tip){
-  const komisyon = komisyonOranYuzde / 100;
-  const kdv = kdvOranYuzde / 100;
+function hesaplaSFiyat(maliyetTRY, komisyonOranYuzde, kdvOranYuzde, kargoUcret, karOranYuzde, tip, stopajOranYuzde, ekstraYuzde, ekstraSabit){
+  const komToplam = (komisyonOranYuzde + ekstraYuzde) / 100;
+  const kdvFactor = 1 / (1 + kdvOranYuzde/100);
+  const stopajFactor = 1 - (stopajOranYuzde/100);
   const kar = karOranYuzde / 100;
-  const payda = tip === "satis"
-    ? (1/(1+kdv) - komisyon - kar)
-    : (1/(1+kdv) - komisyon);
-  if(payda <= 0) return null; // imkansız: komisyon+kar oranı çok yüksek
+  const sabitGider = kargoUcret + ekstraSabit;
+  const katsayi = tip === "satis"
+    ? (kdvFactor*stopajFactor - komToplam - kar)
+    : (kdvFactor*stopajFactor - komToplam);
+  if(katsayi <= 0) return null; // imkansız: kesintiler çok yüksek
   const pay = tip === "satis"
-    ? (maliyetTRY + kargoUcret)
-    : (maliyetTRY * (1 + kar) + kargoUcret);
-  return pay / payda;
+    ? (maliyetTRY + sabitGider)
+    : (maliyetTRY * (1 + kar) + sabitGider);
+  return pay / katsayi;
 }
 
 function hesapla(){
@@ -463,7 +533,9 @@ function hesapla(){
   const komisyonOran = parseFloat(el('komisyonOran').value);
   const kdvOran = parseFloat(el('kdvOran').value);
   const karOran = parseFloat(el('karOran').value);
+  const stopajOran = parseFloat(el('stopajOran').value) || 0;
   const firma = el('kargoFirma').value;
+  const pazar = el('pazaryeri').value;
 
   if(!kur || isNaN(maliyetUsd) || maliyetUsd <= 0 || isNaN(komisyonOran) || isNaN(karOran)){
     el('sonucFiyat').innerHTML = "₺0.00";
@@ -475,11 +547,12 @@ function hesapla(){
 
   const maliyetTRY = maliyetUsd * kur;
   const tiers = kargoData[firma];
+  const {yuzdeToplam, sabitToplam} = ekstraToplamlariHesapla(pazar);
 
   // İlk tahmin: en düşük aralık ücretiyle başla, tutarlı sonuca ulaşana kadar aralıkları dene
   let sonucS = null, kullanilanKargo = null;
   for(const t of tiers){
-    const S = hesaplaSFiyat(maliyetTRY, komisyonOran, kdvOran, t.ucret, karOran, karTipi);
+    const S = hesaplaSFiyat(maliyetTRY, komisyonOran, kdvOran, t.ucret, karOran, karTipi, stopajOran, yuzdeToplam, sabitToplam);
     if(S === null) continue;
     if(S >= t.min && S <= t.max){
       sonucS = S; kullanilanKargo = t.ucret;
@@ -489,10 +562,10 @@ function hesapla(){
   // hiçbir aralıkla tutarlı değilse: en yüksek aralığın ücretiyle hesapla (en garanti senaryo)
   if(sonucS === null){
     const last = tiers[tiers.length-1];
-    const S = hesaplaSFiyat(maliyetTRY, komisyonOran, kdvOran, last.ucret, karOran, karTipi);
+    const S = hesaplaSFiyat(maliyetTRY, komisyonOran, kdvOran, last.ucret, karOran, karTipi, stopajOran, yuzdeToplam, sabitToplam);
     if(S === null){
       el('sonucFiyat').textContent = "—";
-      el('sonucFlag').textContent = "komisyon + kar oranı çok yüksek";
+      el('sonucFlag').textContent = "kesintiler çok yüksek";
       el('breakdown').innerHTML = "";
       el('karDetay').innerHTML = "";
       return;
@@ -501,8 +574,12 @@ function hesapla(){
   }
 
   const kdvTutari = sonucS - sonucS/(1+kdvOran/100);
+  const netKdvHaric = sonucS / (1+kdvOran/100);
   const komisyonTutari = sonucS * (komisyonOran/100);
-  const karTutari = sonucS - kdvTutari - komisyonTutari - kullanilanKargo - maliyetTRY;
+  const ekstraYuzdeTutari = sonucS * (yuzdeToplam/100);
+  const ekstraToplamTutar = ekstraYuzdeTutari + sabitToplam;
+  const stopajTutari = netKdvHaric * (stopajOran/100);
+  const karTutari = sonucS - kdvTutari - komisyonTutari - ekstraToplamTutar - kullanilanKargo - stopajTutari - maliyetTRY;
 
   el('sonucFiyat').innerHTML = fmt(sonucS) + " <small>KDV dahil</small>";
   el('sonucFlag').textContent = "hesaplandı";
@@ -510,7 +587,9 @@ function hesapla(){
   el('breakdown').innerHTML = `
     <div class="bd-item"><div class="k">Maliyet</div><div class="v">${fmt(maliyetTRY)}</div></div>
     <div class="bd-item"><div class="k">Komisyon</div><div class="v">${fmt(komisyonTutari)}</div></div>
+    <div class="bd-item"><div class="k">Hizmet bedeli</div><div class="v">${fmt(ekstraToplamTutar)}</div></div>
     <div class="bd-item"><div class="k">Kargo</div><div class="v">${fmt(kullanilanKargo)}</div></div>
+    <div class="bd-item"><div class="k">Stopaj</div><div class="v">${fmt(stopajTutari)}</div></div>
     <div class="bd-item"><div class="k">KDV</div><div class="v">${fmt(kdvTutari)}</div></div>
     <div class="bd-item kar"><div class="k">Net kar</div><div class="v">${fmt(karTutari)}</div></div>
   `;
@@ -528,10 +607,10 @@ function hesapla(){
 }
 
 // ---------- Olaylar ----------
-['maliyetUsd','komisyonOran','kdvOran','karOran'].forEach(id => {
+['maliyetUsd','komisyonOran','kdvOran','karOran','stopajOran'].forEach(id => {
   el(id).addEventListener('input', hesapla);
 });
-el('pazaryeri').addEventListener('change', () => { komisyonuUygula(); hesapla(); });
+el('pazaryeri').addEventListener('change', () => { komisyonuUygula(); ekstraTablosunuCiz(); hesapla(); });
 el('kategori').addEventListener('change', () => { komisyonuUygula(); hesapla(); });
 el('kargoFirma').addEventListener('change', () => { kargoTablosunuCiz(); hesapla(); });
 
@@ -547,6 +626,12 @@ el('resetKargo').addEventListener('click', () => {
   kargoTablosunuCiz();
   hesapla();
 });
+el('resetEkstra').addEventListener('click', () => {
+  const pazar = el('pazaryeri').value;
+  ekstraData[pazar] = JSON.parse(JSON.stringify(DEFAULT_EKSTRA[pazar]));
+  ekstraTablosunuCiz();
+  hesapla();
+});
 
 // ---------- Başlat ----------
 kategorileriDoldur();
@@ -554,6 +639,7 @@ komisyonTablosunuCiz();
 komisyonuUygula();
 kargoFirmalariniDoldur();
 kargoTablosunuCiz();
+ekstraTablosunuCiz();
 kuruCek();
 </script>
 </body>
